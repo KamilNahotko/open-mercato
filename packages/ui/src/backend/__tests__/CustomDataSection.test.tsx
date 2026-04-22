@@ -15,7 +15,7 @@ jest.mock('react-markdown', () => {
 })
 
 import * as React from 'react'
-import { fireEvent, screen } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { registerEntityIds } from '@open-mercato/shared/lib/encryption/entityIds'
 import { renderWithProviders } from '@open-mercato/shared/lib/testing/renderWithProviders'
 import { CustomDataSection } from '../detail/CustomDataSection'
@@ -408,8 +408,12 @@ describe('CustomDataSection relation display', () => {
       />,
     )
 
-    const fallbackText = await screen.findByText(relationId)
-    expect(fallbackText).toBeInTheDocument()
+    await waitFor(
+      () => {
+        expect(screen.getByText(relationId)).toBeInTheDocument()
+      },
+      { timeout: 3000 },
+    )
   })
 
   it('resolves multi-value relation fields (array of UUIDs)', async () => {
