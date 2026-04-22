@@ -6,16 +6,9 @@ jest.mock('next/navigation', () => ({
 }))
 jest.mock('remark-gfm', () => ({ __esModule: true, default: {} }))
 jest.mock('@uiw/react-md-editor', () => ({ __esModule: true, default: () => null }))
-jest.mock('react-markdown', () => {
-  const React = require('react') as typeof import('react')
-  const ReactMarkdown: React.FC<{ children?: React.ReactNode }> = ({ children }) => (
-    React.createElement(React.Fragment, null, children)
-  )
-  return { __esModule: true, default: ReactMarkdown }
-})
 
 import * as React from 'react'
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen } from '@testing-library/react'
 import { registerEntityIds } from '@open-mercato/shared/lib/encryption/entityIds'
 import { renderWithProviders } from '@open-mercato/shared/lib/testing/renderWithProviders'
 import { CustomDataSection } from '../detail/CustomDataSection'
@@ -408,12 +401,8 @@ describe('CustomDataSection relation display', () => {
       />,
     )
 
-    await waitFor(
-      () => {
-        expect(screen.getByText(relationId)).toBeInTheDocument()
-      },
-      { timeout: 3000 },
-    )
+    const fallbackText = await screen.findByText(relationId)
+    expect(fallbackText).toBeInTheDocument()
   })
 
   it('resolves multi-value relation fields (array of UUIDs)', async () => {
