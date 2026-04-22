@@ -408,9 +408,7 @@ describe('CustomDataSection relation display', () => {
       />,
     )
 
-    const fallbackText = await screen.findByText(relationId).catch(() => null)
-    // eslint-disable-next-line no-console
-    if (!fallbackText) console.log('DOM DUMP:', document.body.innerHTML)
+    const fallbackText = await screen.findByText(relationId)
     expect(fallbackText).toBeInTheDocument()
   })
 
