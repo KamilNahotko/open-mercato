@@ -6,6 +6,13 @@ jest.mock('next/navigation', () => ({
 }))
 jest.mock('remark-gfm', () => ({ __esModule: true, default: {} }))
 jest.mock('@uiw/react-md-editor', () => ({ __esModule: true, default: () => null }))
+jest.mock('react-markdown', () => {
+  const React = require('react') as typeof import('react')
+  const ReactMarkdown: React.FC<{ children?: React.ReactNode }> = ({ children }) => (
+    React.createElement(React.Fragment, null, children)
+  )
+  return { __esModule: true, default: ReactMarkdown }
+})
 
 import * as React from 'react'
 import { fireEvent, screen } from '@testing-library/react'
