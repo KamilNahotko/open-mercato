@@ -1,5 +1,10 @@
 import '@testing-library/jest-dom'
 
+// Force NODE_ENV=test so modules that gate behavior on it (e.g. lazy-loaded
+// markdown/editor components) pick the test-friendly stub path even when the
+// shell environment already has NODE_ENV set (Jest only defaults it when unset).
+process.env.NODE_ENV = 'test'
+
 jest.mock('react-markdown', () => ({
   __esModule: true,
   default: ({ children }: { children?: unknown }) => children ?? null,
