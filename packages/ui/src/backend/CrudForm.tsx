@@ -6,7 +6,6 @@ import { useRouter } from 'next/navigation'
 import { DataLoader } from '../primitives/DataLoader'
 import { flash } from './FlashMessages'
 import dynamic from 'next/dynamic'
-import remarkGfm from 'remark-gfm'
 import { FormHeader } from './forms/FormHeader'
 import { FormFooter } from './forms/FormFooter'
 import { Button } from '../primitives/button'
@@ -257,6 +256,10 @@ export type CrudFormProps<TValues extends Record<string, unknown>> = {
   // Optional injection spot ID for widget injection
   injectionSpotId?: string
   replacementHandle?: string
+  // Lets the host page allow specific internal navigation targets to bypass
+  // the unsaved-changes guard (e.g. navigating between sub-pages of the same record).
+  // The function receives the resolved internal target (`pathname + search + hash`).
+  shouldBypassUnsavedChangesGuard?: (target: string) => boolean
 }
 
 // Group-level custom component context
@@ -428,6 +431,7 @@ export function CrudForm<TValues extends Record<string, unknown>>({
   customFieldsetBindings,
   injectionSpotId,
   replacementHandle,
+  shouldBypassUnsavedChangesGuard,
 }: CrudFormProps<TValues>) {
   // Ensure module field components are registered (client-side)
   React.useEffect(() => { loadGeneratedFieldRegistrations().catch(() => {}) }, [])
@@ -464,6 +468,12 @@ export function CrudForm<TValues extends Record<string, unknown>>({
   const valuesRef = React.useRef(values)
   const [errors, setErrors] = React.useState<Record<string, string>>({})
   const [pending, setPending] = React.useState(false)
+  // Synchronous guard against re-entrant submit/delete invocations (e.g. rapid
+  // double-clicks of "Save" while validation and network IO are still running).
+  // React state is async, so `pending` cannot block a click that fires before
+  // the next render; a ref flips on the first call and rejects duplicates.
+  const submittingRef = React.useRef(false)
+  const deletingRef = React.useRef(false)
   const [formError, setFormError] = React.useState<string | null>(null)
   const [dynamicOptions, setDynamicOptions] = React.useState<Record<string, CrudFieldOption[]>>({})
   const [cfDefinitions, setCfDefinitions] = React.useState<CustomFieldDefDto[]>([])
@@ -536,6 +546,10 @@ export function CrudForm<TValues extends Record<string, unknown>>({
   const submitNavigationBypassTimeoutRef = React.useRef<number | null>(null)
   const [hasUnsavedChanges, setHasUnsavedChanges] = React.useState(false)
   const popStateRollbackRef = React.useRef(false)
+  const shouldBypassUnsavedChangesGuardRef = React.useRef(shouldBypassUnsavedChangesGuard)
+  React.useEffect(() => {
+    shouldBypassUnsavedChangesGuardRef.current = shouldBypassUnsavedChangesGuard
+  }, [shouldBypassUnsavedChangesGuard])
 
   React.useEffect(() => {
     if (embedded) {
@@ -632,6 +646,7 @@ export function CrudForm<TValues extends Record<string, unknown>>({
       if (anchor.target === '_blank' || event.metaKey || event.ctrlKey || event.shiftKey) return
       const target = resolveInternalNavigationTarget(href)
       if (!target) return
+      if (shouldBypassUnsavedChangesGuardRef.current?.(target)) return
       event.preventDefault()
       event.stopPropagation()
       if (navigationConfirmPendingRef.current) return
@@ -650,6 +665,9 @@ export function CrudForm<TValues extends Record<string, unknown>>({
       ((data: unknown, unused: string, url?: string | URL | null) => {
         const target = resolveInternalNavigationTarget(url ?? null)
         if (!target || navigationPromptBypassRef.current || submitNavigationBypassRef.current) {
+          return original(data, unused, url)
+        }
+        if (shouldBypassUnsavedChangesGuardRef.current?.(target)) {
           return original(data, unused, url)
         }
         if (navigationConfirmPendingRef.current) {
@@ -891,6 +909,8 @@ export function CrudForm<TValues extends Record<string, unknown>>({
   // Unified delete handler with confirmation
   const handleDelete = React.useCallback(async () => {
     if (!onDelete) return
+    if (deletingRef.current) return
+    deletingRef.current = true
     const deletePayload = values as TValues
     try {
       const confirmed = await confirm({
@@ -996,6 +1016,7 @@ export function CrudForm<TValues extends Record<string, unknown>>({
       const message = err instanceof Error && err.message ? err.message : deleteErrorMessage
       try { flash(message, 'error') } catch {}
     } finally {
+      deletingRef.current = false
       setPending(false)
     }
   }, [
@@ -1825,7 +1846,11 @@ export function CrudForm<TValues extends Record<string, unknown>>({
     }).catch((err) => {
       console.error('[CrudForm] Error in onFieldChange:', err)
     })
-  }, [extendedInjectionEventsEnabled, t, translateValidationMessage, triggerInjectionEvent])
+  }, [extendedInjectionEventsEnabled, flash, t, translateValidationMessage, triggerInjectionEvent])
+
+  const onBlurRequest = React.useCallback((fieldId: string) => {
+    void validateFieldOnBlur(fieldId)
+  }, [validateFieldOnBlur])
 
   const handleFieldsetSelectionChange = React.useCallback(
     (entityId: string, nextCode: string | null) => {
@@ -1980,6 +2005,9 @@ export function CrudForm<TValues extends Record<string, unknown>>({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (formReadOnly) return
+    if (submittingRef.current) return
+    submittingRef.current = true
+    try {
     setFormError(null)
     setErrors({})
 
@@ -2280,7 +2308,16 @@ export function CrudForm<TValues extends Record<string, unknown>>({
     } finally {
       setPending(false)
     }
+    } finally {
+      submittingRef.current = false
+    }
   }
+
+  // Tracks the last loader function observed per field id so we can invalidate cached
+  // options when callers rebuild loaders that capture different state (e.g. a tenant id).
+  const dynamicOptionLoadersRef = React.useRef<
+    Map<string, ((query?: string) => Promise<CrudFieldOption[]>) | undefined>
+  >(new Map())
 
   // Stable key prevents infinite re-render loop (see #814) — do not depend on allFields directly.
   React.useEffect(() => {
@@ -2293,6 +2330,7 @@ export function CrudForm<TValues extends Record<string, unknown>>({
         )
         .map(async (f) => {
           try {
+            dynamicOptionLoadersRef.current.set(f.id, f.loadOptions)
             const opts = await f.loadOptions()
             if (!cancelled) setDynamicOptions((prev) => ({ ...prev, [f.id]: opts }))
           } catch {
@@ -2312,7 +2350,16 @@ export function CrudForm<TValues extends Record<string, unknown>>({
     const builtin = field as CrudBuiltinField
     const loader = builtin.loadOptions
     if (typeof loader === 'function') {
-      if (query === undefined && Array.isArray(dynamicOptions[field.id])) return dynamicOptions[field.id]
+      const previousLoader = dynamicOptionLoadersRef.current.get(field.id)
+      const loaderChanged = previousLoader !== loader
+      dynamicOptionLoadersRef.current.set(field.id, loader)
+      if (
+        query === undefined &&
+        !loaderChanged &&
+        Array.isArray(dynamicOptions[field.id])
+      ) {
+        return dynamicOptions[field.id]
+      }
       try {
         const fetched = await loader(query)
         if (query === undefined) {
@@ -2400,7 +2447,7 @@ export function CrudForm<TValues extends Record<string, unknown>>({
               error={errors[f.id]}
               options={fieldOptionsById.get(f.id) || EMPTY_OPTIONS}
               setValue={setValue}
-              onBlurRequest={(fieldId) => { void validateFieldOnBlur(fieldId) }}
+              onBlurRequest={onBlurRequest}
               values={values}
               loadFieldOptions={loadFieldOptions}
               autoFocus={!formReadOnly && Boolean(firstFieldId && f.id === firstFieldId)}
@@ -2845,7 +2892,7 @@ export function CrudForm<TValues extends Record<string, unknown>>({
                     error={errors[f.id]}
                     options={fieldOptionsById.get(f.id) || EMPTY_OPTIONS}
                     setValue={setValue}
-                    onBlurRequest={(fieldId) => { void validateFieldOnBlur(fieldId) }}
+                    onBlurRequest={onBlurRequest}
                     values={values}
                     loadFieldOptions={loadFieldOptions}
                     autoFocus={!formReadOnly && Boolean(firstFieldId && f.id === firstFieldId)}
@@ -3159,14 +3206,42 @@ const MDEditor = dynamic(async () => {
   const mod = await import('@uiw/react-md-editor')
   return mod.default
 }, { ssr: false }) as React.ComponentType<UiWMDEditorProps>
+
+type MarkdownPreviewOptions = NonNullable<UiWMDEditorProps['previewOptions']>
+
+let markdownPreviewOptionsPromise: Promise<MarkdownPreviewOptions> | null = null
+
+async function loadMarkdownPreviewOptions(): Promise<MarkdownPreviewOptions> {
+  if (!markdownPreviewOptionsPromise) {
+    markdownPreviewOptionsPromise = import('remark-gfm')
+      .then((mod) => ({ remarkPlugins: [mod.default ?? mod] } as MarkdownPreviewOptions))
+      .catch(() => ({} as MarkdownPreviewOptions))
+  }
+  return markdownPreviewOptionsPromise
+}
+
+const EMPTY_PREVIEW_OPTIONS: MarkdownPreviewOptions = {}
+
 const MarkdownEditor = React.memo(function MarkdownEditor({ value = '', onChange }: MDProps) {
   const containerRef = React.useRef<HTMLDivElement | null>(null)
   const [local, setLocal] = React.useState<string>(value)
+  const [previewOptions, setPreviewOptions] = React.useState<MarkdownPreviewOptions>(EMPTY_PREVIEW_OPTIONS)
   const typingRef = React.useRef(false)
 
   React.useEffect(() => {
     if (!typingRef.current) setLocal(value)
   }, [value])
+
+  React.useEffect(() => {
+    let mounted = true
+    void loadMarkdownPreviewOptions().then((resolved) => {
+      if (!mounted) return
+      setPreviewOptions(resolved)
+    })
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   const handleChange = React.useCallback((v?: string) => {
     typingRef.current = true
@@ -3189,7 +3264,7 @@ const MarkdownEditor = React.memo(function MarkdownEditor({ value = '', onChange
         value={local}
         height={220}
         onChange={handleChange}
-        previewOptions={{ remarkPlugins: [remarkGfm] }}
+        previewOptions={previewOptions}
       />
     </div>
   )
@@ -3787,6 +3862,8 @@ const FieldControl = React.memo(function FieldControlImpl({
   prev.loadFieldOptions === next.loadFieldOptions &&
   prev.autoFocus === next.autoFocus &&
   prev.onSubmitRequest === next.onSubmitRequest &&
+  prev.setValue === next.setValue &&
+  prev.onBlurRequest === next.onBlurRequest &&
   prev.wrapperClassName === next.wrapperClassName &&
   prev.entityIdForField === next.entityIdForField &&
   prev.recordId === next.recordId &&

@@ -1,5 +1,5 @@
 import { GenericContainer } from 'testcontainers'
-import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
+import type { ChildProcess, StdioOptions } from 'node:child_process'
 import { createServer } from 'node:net'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { createInterface, type Interface } from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
+import spawn from 'cross-spawn'
 import { resolveEnvironment } from '../resolver'
 import { resolveSpawnCommand } from '../spawn'
 import { discoverIntegrationSpecFiles as discoverIntegrationSpecFilesShared } from './integration-discovery'
@@ -74,6 +75,7 @@ type IntegrationCoverageOptions = {
   verbose: boolean
   workers: number | null
   retries: number | null
+  shard: string | null
   json: boolean
   keepRawV8: boolean
   forceRebuild: boolean
@@ -141,7 +143,9 @@ type EphemeralEnvironmentState = {
   startedAt: string
 }
 
-type PlaywrightRunOptions = Pick<InteractiveIntegrationOptions, 'verbose' | 'captureScreenshots' | 'workers' | 'retries'>
+type PlaywrightRunOptions = Pick<InteractiveIntegrationOptions, 'verbose' | 'captureScreenshots' | 'workers' | 'retries'> & {
+  shard?: string | null
+}
 
 const DEFAULT_APP_READY_TIMEOUT_MS = 90_000
 const APP_READY_INTERVAL_MS = 1_000
@@ -1617,6 +1621,7 @@ function buildReusableEnvironment(baseUrl: string, captureScreenshots: boolean):
     OM_WEBHOOKS_ALLOW_PRIVATE_URLS: process.env.OM_WEBHOOKS_ALLOW_PRIVATE_URLS ?? '1',
     ENABLE_CRUD_API_CACHE: 'true',
     MOCK_GATEWAY_WEBHOOK_SECRET: 'open-mercato-mock-dev-webhook-secret',
+    MOCK_CARRIER_WEBHOOK_SECRET: 'open-mercato-mock-dev-carrier-webhook-secret',
     NEXT_PUBLIC_OM_EXAMPLE_INJECTION_WIDGETS_ENABLED: 'true',
     NEXT_PUBLIC_UMES_DEVTOOLS: 'true',
     CI: 'true',
@@ -1934,6 +1939,7 @@ export function parseIntegrationCoverageOptions(rawArgs: string[]): IntegrationC
   let verbose = false
   let workers: number | null = null
   let retries: number | null = null
+  let shard: string | null = null
   let json = false
   let keepRawV8 = false
   let forceRebuild = false
@@ -2018,6 +2024,26 @@ export function parseIntegrationCoverageOptions(rawArgs: string[]): IntegrationC
       retries = parsed
       continue
     }
+    if (argument === '--shard') {
+      const value = rawArgs[index + 1]
+      if (!value || value.startsWith('--')) {
+        throw new Error('Missing value for --shard')
+      }
+      if (!/^\d+\/\d+$/.test(value)) {
+        throw new Error(`Invalid --shard value: ${value}. Expected format: N/M`)
+      }
+      shard = value
+      index += 1
+      continue
+    }
+    if (argument.startsWith('--shard=')) {
+      const value = argument.slice('--shard='.length)
+      if (!/^\d+\/\d+$/.test(value)) {
+        throw new Error(`Invalid --shard value: ${value}. Expected format: N/M`)
+      }
+      shard = value
+      continue
+    }
     if (argument === '--json') {
       json = true
       continue
@@ -2044,6 +2070,7 @@ export function parseIntegrationCoverageOptions(rawArgs: string[]): IntegrationC
     verbose,
     workers,
     retries,
+    shard,
     json,
     keepRawV8,
     forceRebuild,
@@ -2480,6 +2507,7 @@ export async function runIntegrationCoverageReport(rawArgs: string[]): Promise<v
           captureScreenshots: options.captureScreenshots,
           workers: options.workers,
           retries: options.retries,
+          shard: options.shard,
         },
       )
       return null
@@ -2600,6 +2628,9 @@ async function runPlaywrightSelection(
   }
   if (options.retries !== null) {
     args.push('--retries', String(options.retries))
+  }
+  if (options.shard) {
+    args.push('--shard', options.shard)
   }
   if (Array.isArray(selection) && selection.length > 0) {
     args.push(...selection)
@@ -2849,6 +2880,7 @@ export async function startEphemeralEnvironment(options: EphemeralRuntimeOptions
       OM_WEBHOOKS_ALLOW_PRIVATE_URLS: process.env.OM_WEBHOOKS_ALLOW_PRIVATE_URLS ?? '1',
       ENABLE_CRUD_API_CACHE: 'true',
       MOCK_GATEWAY_WEBHOOK_SECRET: 'open-mercato-mock-dev-webhook-secret',
+      MOCK_CARRIER_WEBHOOK_SECRET: 'open-mercato-mock-dev-carrier-webhook-secret',
       NEXT_PUBLIC_OM_EXAMPLE_INJECTION_WIDGETS_ENABLED: 'true',
       NEXT_PUBLIC_UMES_DEVTOOLS: 'true',
       CI: 'true',
